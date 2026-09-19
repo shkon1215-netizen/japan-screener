@@ -1,0 +1,15 @@
+# Environment
+.venv/
+__pycache__/
+*.pyc
+
+# Fetch cache — rebuilt on every run, per-machine, and large.
+.jp_cache/
+
+# Generated results and dashboards. The Actions workflow regenerates these on
+# every run, so committing them only creates merge noise and stale data.
+jp_screen_results.csv
+jp_screen_results_meta.json
+jp_dashboard.html
+jp_dashboard_artifact.html
+site/

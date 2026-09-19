@@ -1,0 +1,6 @@
+pandas<3
+numpy
+requests
+lxml
+openpyxl
+yfinance>=0.2.40

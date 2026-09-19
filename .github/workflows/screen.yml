@@ -1,0 +1,68 @@
+name: Run screen and publish
+
+# The TSE closes at 15:30 JST. This runs at 16:30 JST (07:30 UTC), Mon-Fri,
+# after the close and after Yahoo Japan has settled the day's figures. Cron is
+# UTC and does not observe JST; 07:30 UTC Mon-Fri is 16:30 JST Mon-Fri.
+on:
+  schedule:
+    - cron: "30 7 * * 1-5"
+  workflow_dispatch:        # lets you trigger a run by hand from the Actions tab
+  push:
+    branches: [main]
+    paths-ignore:
+      - "**.md"
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A scheduled run and a manual one must not publish over each other.
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    # Japan's universe is ~660 names after the gates against Korea's ~240, and
+    # two of the four sources are per-ticker. A full cold run is 8-12 minutes.
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt "pandas<3"
+
+      - name: Offline logic check
+        run: python test_japan.py
+
+      # One run, not one per board: with a USD 600m floor the universe is 92%
+      # Prime, and Standard and Growth are too thin to form their own cohorts.
+      # See the BOARD_FILES note in dashboard.py.
+      - name: Screen Japan
+        run: python main_jp.py --board ALL --all --dashboard ""
+
+      - name: Build site
+        run: python build_site.py
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
