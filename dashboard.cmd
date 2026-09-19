@@ -1,9 +1,9 @@
 @echo off
 REM Double-click this to open the dashboard with a working Refresh button.
 REM
-REM The button needs a local server, because refreshing means scraping KIND and
-REM Naver and redoing the peer maths in pandas - a browser cannot do that on its
-REM own. This starts that server and opens the page. Keep this window open while
+REM The button needs a local server, because refreshing means fetching JPX, Yahoo
+REM Japan and kabutan and redoing the peer maths in pandas - a browser cannot do
+REM that on its own. This starts it and opens the page. Keep this window open while
 REM you use the dashboard; closing it stops the server.
 
 cd /d "%~dp0"
