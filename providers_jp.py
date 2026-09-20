@@ -178,6 +178,30 @@ class Throttled(RuntimeError):
 
 _THROTTLE_STATUS = (301, 302, 307, 308, 429, 503)
 
+# A per-ticker fetch that returns nothing is the least informative failure in
+# this file: "fundamentals: 0 of 660" is true whether the host refused us, went
+# down, or changed its markup. So the first few rejections are logged with
+# their status, once per host, and the run says which it was. This was not
+# hypothetical - the first CI run failed exactly this way and the log could not
+# distinguish a block from a parse error.
+_SEEN_STATUS: dict = {}
+
+
+def _note_status(url: str, status: int, detail: str = "") -> None:
+    host = url.split("/")[2] if "//" in url else url
+    key = (host, status)
+    _SEEN_STATUS[key] = _SEEN_STATUS.get(key, 0) + 1
+    if _SEEN_STATUS[key] <= 2:
+        log.warning("%s answered HTTP %d%s (%s)", host, status,
+                    (" - " + detail) if detail else "", url)
+
+
+def fetch_failure_summary() -> str:
+    if not _SEEN_STATUS:
+        return ""
+    return ", ".join("%s HTTP %d x%d" % (h, s, n)
+                     for (h, s), n in sorted(_SEEN_STATUS.items()))
+
 
 def _get_text(s: requests.Session, url: str, timeout: int = 30,
               tries: int = 3, backoff: float = 2.0) -> str:
@@ -201,6 +225,7 @@ def _get_text(s: requests.Session, url: str, timeout: int = 30,
             time.sleep(backoff * (attempt + 1))
             continue
         if r.status_code != 200:
+            _note_status(url, r.status_code, text.strip()[:80].replace("\n", " "))
             return ""
         return text
     if seen_throttle:
@@ -547,7 +572,14 @@ def fetch_fundamentals(codes, cache: Cache, delay: float = 0.0,
             except Throttled:
                 throttled.append(code)
                 return None
-            if not text or "決算期" not in text:
+            if not text:
+                return None
+            if "決算期" not in text:
+                # HTTP 200 with no 決算期 table: either the markup moved or we
+                # are being served an interstitial. Both are silent failures,
+                # so say which by logging a fingerprint of what did arrive.
+                _note_status(KABUTAN_FINANCE.format(code=code), 200,
+                             "no 決算期 in %d bytes" % len(text))
                 return None
             try:
                 tables = pd.read_html(io.StringIO(text))

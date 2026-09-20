@@ -164,7 +164,11 @@ def main() -> int:
     fund = P.fetch_fundamentals(pre["ticker"], cache,
                                 delay=0.0, workers=cfg.irbank_workers)
     if fund.empty:
-        log.error("no fundamentals came back - kabutan unreachable?")
+        log.error("no fundamentals came back. What the source actually said: %s",
+                  P.fetch_failure_summary() or "nothing - no responses at all")
+        log.error("If this is CI, kabutan is likely refusing the runner's IP. "
+                  "Everything else here answers GitHub's runners; kabutan is "
+                  "the one that has to be checked from the machine that runs.")
         return 1
     pre = pre.merge(fund, on="ticker", how="left")
 
