@@ -20,7 +20,9 @@ python check_setup.py     # nine live checks, ~1 min
 python main_jp.py -v      # full run, 8-12 min cold
 ```
 
-Open `jp_dashboard.html`. Or double-click `dashboard.cmd`, which starts a local
+Live, rebuilt each weekday at 16:30 JST: **https://shkon1215-netizen.github.io/japan-screener/**
+
+Or locally: open `jp_dashboard.html`. Or double-click `dashboard.cmd`, which starts a local
 server and gives the dashboard a working Refresh button.
 
 ## What it screens
@@ -50,7 +52,8 @@ All free, no account needed.
 | **JPX** `data_j.xlsx` | Roster, market segment, official 33業種 classification, TOPIX scale. Also separates ETFs, REITs, PRO Market and foreign listings into their own categories, so they never enter the universe. |
 | **JPX** market alerts | 監理銘柄 / 整理銘柄, by code. |
 | **Yahoo! Finance Japan** | Market-cap ranking, sorted descending — the whole cross-section above the floor in ~20 requests. |
-| **kabutan** | Per ticker: four filed years of P&L with EPS and DPS, three of balance sheet with BPS, three of cash flow, plus ROE. |
+| **kabutan** | Per ticker: four filed years of P&L with EPS and DPS, three of balance sheet with BPS, three of cash flow, plus ROE and the company's own guidance. Blocks datacenter IPs, so it is local-only. |
+| **yfinance statements** | The fallback, and what CI uses: five filed columns of income statement, balance sheet and cash flow. No company guidance. |
 | **yfinance** | Batched daily volumes (liquidity) and monthly closes (own-history multiples); `.info` for EV/EBITDA. |
 | **Frankfurter** | USD/JPY, deliberately on a different host from everything else. |
 
@@ -67,10 +70,14 @@ All free, no account needed.
   Measured, it passes 20.3% of the universe.
 - **kabutan's EPS is split-adjusted and its BPS is not**, which silently breaks
   the PBR history across any split. It is corrected from the split events that
-  arrive with the price panel. See invariant 11 in `CLAUDE.md`.
+  arrive with the price panel. yfinance restates both, so each source declares which. See invariants 11-12 in `CLAUDE.md`.
 - **Forecasts are carried but never screened on.** Japanese headline PER is
   forward, struck on company guidance; every screen here runs on the last filed
   year, with the guidance alongside for context.
+- **The published page and a local run use different sources**, because
+  kabutan refuses datacenter IPs. They agree closely — BPS to 0.0% and EPS to
+  1.2% on the median large name — but not exactly, and the published page has
+  no guidance columns. `CLAUDE.md` has the measured comparison.
 
 ## Dashboard
 

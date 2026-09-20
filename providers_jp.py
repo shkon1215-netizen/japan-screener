@@ -1096,13 +1096,28 @@ class JapanEnricher:
         except Exception:                                  # noqa: BLE001
             return {}
 
-    def probe(self) -> bool:
+    def probe(self, tries: int = 3, backoff: float = 20.0) -> bool:
         """One known-good, heavily covered name. If Toyota comes back without
-        a market cap, the session is throttled and nothing else will work."""
-        info = self._info("7203.T")
-        ok = bool(info.get("marketCap"))
-        log.info("yfinance probe: %s", "ok" if ok else "THROTTLED or blocked")
-        return ok
+        a market cap, the session is throttled and nothing else will work.
+
+        Retried with a long backoff because the block is usually transient and
+        the alternative is failing a whole run. Observed: two CI runs ten
+        minutes apart, the first fine and the second answered
+        `401 Unauthorized` for every symbol - the limit is per source IP and
+        recovers on its own. Backing off here costs a minute; not backing off
+        costs the publish.
+        """
+        for attempt in range(tries):
+            if bool(self._info("7203.T").get("marketCap")):
+                log.info("yfinance probe: ok%s",
+                         " (after %d retries)" % attempt if attempt else "")
+                return True
+            if attempt < tries - 1:
+                log.warning("yfinance probe: throttled, waiting %.0fs",
+                            backoff * (attempt + 1))
+                time.sleep(backoff * (attempt + 1))
+        log.info("yfinance probe: THROTTLED or blocked")
+        return False
 
     def enrich(self, codes) -> pd.DataFrame:
         codes = list(codes)

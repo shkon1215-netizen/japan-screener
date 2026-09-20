@@ -11,6 +11,10 @@ python test_japan.py      # offline logic check — must pass, no network needed
 python check_setup.py     # tests all nine live calls individually
 python main_jp.py -v      # full run, 8–12 min cold, ~1 min warm
 
+# fundamentals source: auto probes kabutan and falls back to yfinance.
+# kabutan is blocked from datacenter IPs, so CI must name yfinance explicitly.
+python main_jp.py --source yfinance
+
 # each run rewrites jp_dashboard.html in place — open it, re-run, reload
 python serve.py           # 127.0.0.1:8765, opens a browser, Refresh button works
 python serve.py --min-roe 8       # extra args go to the run
@@ -32,7 +36,7 @@ expensive.
 |---|---|
 | `screener.py` | Core engine, ported from Korea. `sanitize_metrics`, `compute_peer_benchmarks`, `score` are market-agnostic — do not edit here first. |
 | `config_jp.py` | Thresholds, metric bounds, 種類株式 detection, the measured percentile table. |
-| `providers_jp.py` | JPX roster + alerts, Yahoo Japan cross-section, kabutan per ticker, yfinance prices and EV/EBITDA. |
+| `providers_jp.py` | JPX roster + alerts, Yahoo Japan cross-section, two interchangeable fundamentals sources (kabutan, yfinance), yfinance prices and EV/EBITDA. |
 | `japan_filters.py` | Japan share-class hygiene, ROE gate, absolute screen, own-history screen, TSE flags. |
 | `main_jp.py` | CLI. Orders the gates so per-ticker calls run last. |
 | `dashboard.py` | Generated — do not edit. Run `sync_dashboard_from_korea.py`. |
@@ -106,7 +110,30 @@ expensive.
     book. `abs_financials_pbr_only` (default on) lets them qualify on PBR + ROE;
     those rows carry `abs_via_carveout`.
 
-11. **kabutan's EPS is split-adjusted and its BPS is not.** The columns are
+11. **Each fundamentals source declares whether its per-share figures are
+    restated for splits, and `build_valuation_history` reads that rather than
+    assuming.** The two sources differ, and the difference is invisible in the
+    numbers themselves:
+
+    | | EPS | BPS |
+    |---|---|---|
+    | kabutan | restated (修正1株益) | **as filed** |
+    | yfinance | restated | restated |
+
+    Getting it wrong does not raise; it produces a plausible multiple that is
+    simply the wrong one. Both directions were hit during this build. See the
+    next invariant for the kabutan case; for yfinance, treating its already-
+    restated figures as filed inflated every historical multiple and took the
+    own-history screen from 0 passes to 7 in the top 70 names — a wrong answer
+    that looked like a finding.
+
+    The check that says both are now right: run the same tickers through both
+    sources and compare. 日立 (6501), which split 5:1, comes back as PER
+    10.475 / 21.889 / 25.71 / 25.035 from yfinance against kabutan's 10.595 /
+    21.962 / 25.825 / 25.249, and identical PBR. Two independent providers
+    agreeing to a rounding is the evidence; either alone is just a number.
+
+12. **kabutan's EPS is split-adjusted and its BPS is not.** The columns are
     labelled 修正1株益 and 修正1株配 — *restated* — but the balance-sheet column
     is plain 1株純資産, as filed. Yahoo's price series is split-adjusted
     regardless of `auto_adjust`, because splits are applied to the chart data
@@ -121,13 +148,61 @@ expensive.
     panel and cost nothing. `test_japan.py` holds this down with the real
     figures.
 
-12. **Forecasts are carried and never screened on.** Japanese convention is
+13. **Forecasts are carried and never screened on.** Japanese convention is
     forward: the PER a Japanese investor quotes is 会社予想PER, struck on the
     company's own guidance. That guidance is a formal disclosure rather than an
     analyst consensus, so it is worth having — but it is still management's
     opinion of its own future. Every screen runs on the last *filed* year;
     `fwd_eps`, `fwd_dps`, `forward_pe` and `div_yield_fwd` ride along for
     context. Same rule as Korea's `isConsensus: "Y"`, different justification.
+
+## Two fundamentals sources, and why that is not a choice
+
+`--source auto` (default) probes kabutan with three tickers and falls back.
+
+| | kabutan | yfinance |
+|---|---|---|
+| reachable from CI | **no** — HTTP 405 | yes |
+| filed years | 4 EPS / 3 BPS | **5 of all three statements** |
+| company guidance (会社予想) | **yes** | no |
+| filed DPS | yes | trailing rate from `.info` |
+
+**kabutan answers HTTP 405 to every request from a GitHub runner** — 659 of 659
+on the first CI run, with an English WAF page. A runner-side probe found
+minkabu at 403 and irbank's HTML site at 403 too; only irbank's CSV host stays
+open, and it rate-limits too hard to use (see below). These are deliberate
+blocks on datacenter traffic rather than rate limits, so they are **routed
+around, not worked around** — the workflow names `--source yfinance` and says
+why in the file.
+
+yfinance is not a downgrade for the screen itself. It carries five filed
+columns where kabutan carries four, so the own-history screen is *deeper*, and
+the two agree on the reconstructed history to within a rounding. What is lost
+is the company's own 会社予想. yfinance's `forwardEps` is **analyst consensus**,
+which is a different thing, and it is not substituted for guidance — under this
+source the forecast columns on the published page are simply empty.
+
+**How closely the two agree, measured on twelve large names:** BPS median
+difference **0.0%** (eleven of twelve identical to five significant figures),
+EPS median difference **1.2%**. But the tails matter and they are not random:
+
+| | kabutan | yfinance | diff |
+|---|---|---|---|
+| 三菱ＵＦＪ (8306) EPS | 213.2 | 165.0 | **−22.6%** |
+| デンソー (6902) BPS | 2,040 | 1,767 | **−13.4%** |
+
+yfinance normalises Japanese bank and insurer statements poorly, and picks a
+different equity line where minority interests or treasury stock are large. So
+kabutan stays the default wherever it is reachable, and **the published page
+should be read as slightly noisier than a local run, with the noise
+concentrated in financials.**
+
+Consequence worth remembering: **the local dashboard and the published one are
+not built from the same source.** Expect the counts to differ — the first
+published run found 123 relative / 22 absolute / 9 history against a local
+kabutan run's 110 / 18 / 7, from a combination of the per-share differences
+above and yfinance's extra filed year. A forecast column that is populated
+locally and blank on Pages is the same cause, not a bug.
 
 ## Known gaps (ranked by value of fixing)
 
