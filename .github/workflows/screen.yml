@@ -44,11 +44,23 @@ jobs:
       - name: Offline logic check
         run: python test_japan.py
 
+      # --source yfinance, not auto: kabutan answers HTTP 405 to every request
+      # from a GitHub runner (659 of 659, with an English WAF page), and
+      # minkabu and irbank's HTML site answer 403. Those are deliberate blocks
+      # on datacenter traffic, not rate limits, so CI routes around them rather
+      # than trying to look like something else. Naming the source explicitly
+      # skips a probe that is guaranteed to fail and says why in the file.
+      #
+      # yfinance is not a downgrade for the screen: it carries five filed
+      # columns against kabutan's four, and the two agree on the history to
+      # within a rounding (日立 PER 10.48/21.89/25.71 vs 10.60/21.96/25.83).
+      # What is lost is the company's own 会社予想, so the forecast columns
+      # are empty on the published page.
+      #
       # One run, not one per board: with a USD 600m floor the universe is 92%
       # Prime, and Standard and Growth are too thin to form their own cohorts.
-      # See the BOARD_FILES note in dashboard.py.
       - name: Screen Japan
-        run: python main_jp.py --board ALL --all --dashboard ""
+        run: python main_jp.py --board ALL --source yfinance --all --dashboard ""
 
       - name: Build site
         run: python build_site.py

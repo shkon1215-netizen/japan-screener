@@ -143,8 +143,9 @@ class ScreenConfig:
     # Two workers, not six. The only per-ticker source that can throttle
     # silently is Yahoo, and a throttled .info comes back as a dict with the
     # fields missing rather than as an error.
-    max_workers: int = 2
-    irbank_workers: int = 2
+    max_workers: int = 2            # yfinance .info - the throttling one
+    kabutan_workers: int = 3        # measured fine at 3; kabutan does not throttle
+    yf_stmt_workers: int = 3        # statement endpoints; 660 names in ~2.7 min
     request_delay: float = 0.35
     cache_dir: str = ".jp_cache"
     cache_ttl_hours: int = 20

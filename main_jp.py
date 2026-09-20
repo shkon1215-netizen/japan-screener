@@ -58,6 +58,11 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--coe", type=float, default=8.0,
                    help="cost of equity %% for the fair-PBR test")
     p.add_argument("--abs-min-div", type=float, default=2.0)
+    p.add_argument("--source", choices=["auto", "kabutan", "yfinance"],
+                   default="auto",
+                   help="filed fundamentals. kabutan is richer but blocks "
+                        "datacenter IPs, so CI must use yfinance; auto probes "
+                        "and falls back.")
     p.add_argument("--no-ev", action="store_true",
                    help="skip the yfinance .info pass; screens on PER and PBR "
                         "alone and leaves EV/EBITDA missing everywhere")
@@ -73,6 +78,59 @@ def parse_args() -> argparse.Namespace:
                    help="write every scored row, not just the passing ones")
     p.add_argument("-v", "--verbose", action="store_true")
     return p.parse_args()
+
+
+def fetch_fundamentals(choice: str, tickers, cache, cfg, log):
+    """Filed per-share figures, from whichever source this machine can reach.
+
+    Two sources, and the choice is not about quality alone - it is about where
+    the code is running. kabutan answers HTTP 405 to every request from a
+    GitHub runner (659 of 659 on the first CI run), and minkabu and irbank's
+    HTML site answer 403. That is a deliberate block on datacenter traffic, so
+    CI cannot use them and it would be wrong to try.
+
+      kabutan   preferred when reachable. Carries the company's own 会社予想,
+                which is a formal disclosure and the basis of every PER quoted
+                in Japan, plus a filed DPS. Four years of EPS, three of BPS.
+      yfinance  works everywhere, including CI. Five filed columns of income
+                statement, balance sheet and cash flow, so the own-history
+                screen is actually DEEPER. No company guidance - yfinance's
+                forwardEps is analyst consensus, which is a different thing
+                and is not carried in its place (invariant 12).
+
+    `auto` probes kabutan with three tickers and falls back rather than
+    discovering the block 660 requests later.
+    """
+    tickers = list(tickers)
+    if choice == "auto":
+        probe = P.fetch_fundamentals(tickers[:3], cache, workers=1)
+        choice = "kabutan" if len(probe) >= 2 else "yfinance"
+        if choice == "yfinance":
+            log.warning("kabutan is not answering (%s) - falling back to "
+                        "yfinance. Forecast columns will be empty.",
+                        P.fetch_failure_summary() or "no responses")
+        log.info("fundamentals source auto-selected: %s", choice)
+
+    log.info("fetching filed fundamentals for %d names from %s...",
+             len(tickers), choice)
+    if choice == "kabutan":
+        fund = P.fetch_fundamentals(tickers, cache, delay=0.0,
+                                    workers=cfg.kabutan_workers)
+    else:
+        fund = P.fetch_fundamentals_yf(tickers, cache, delay=0.0,
+                                       workers=cfg.yf_stmt_workers)
+    if fund.empty:
+        log.error("no fundamentals came back. What the source actually said: %s",
+                  P.fetch_failure_summary() or "nothing - no responses at all")
+        return None, choice
+    covered = len(fund) / max(len(tickers), 1)
+    if covered < cfg.min_priced_fraction:
+        log.error("only %d of %d names returned fundamentals (%.0f%%). "
+                  "Screening a partial universe reports a plausible lie; "
+                  "re-run to fill the gap from cache.",
+                  len(fund), len(tickers), covered * 100)
+        return None, choice
+    return fund, choice
 
 
 def main() -> int:
@@ -160,15 +218,8 @@ def main() -> int:
         return 0
 
     # 4. per-ticker work starts HERE and nowhere earlier.
-    log.info("fetching filed fundamentals for %d names...", len(pre))
-    fund = P.fetch_fundamentals(pre["ticker"], cache,
-                                delay=0.0, workers=cfg.irbank_workers)
-    if fund.empty:
-        log.error("no fundamentals came back. What the source actually said: %s",
-                  P.fetch_failure_summary() or "nothing - no responses at all")
-        log.error("If this is CI, kabutan is likely refusing the runner's IP. "
-                  "Everything else here answers GitHub's runners; kabutan is "
-                  "the one that has to be checked from the machine that runs.")
+    fund, source = fetch_fundamentals(a.source, pre["ticker"], cache, cfg, log)
+    if fund is None:
         return 1
     pre = pre.merge(fund, on="ticker", how="left")
 
@@ -192,6 +243,11 @@ def main() -> int:
     eps = pd.to_numeric(pre["trailing_eps"], errors="coerce")
     bps = pd.to_numeric(pre["book_value_ps"], errors="coerce")
     dps = pd.to_numeric(pre.get("dps"), errors="coerce")
+    # Under --source yfinance there is no filed 一株配当, so fall back to the
+    # trailing rate the .info pass already returned. Still trailing cash
+    # actually paid, not a forecast, so the screen's meaning is unchanged.
+    if "dividend_rate" in pre.columns:
+        dps = dps.fillna(pd.to_numeric(pre["dividend_rate"], errors="coerce"))
     pre["trailing_pe"] = (close / eps).where(eps > 0)
     pre["price_to_book"] = (close / bps).where(bps > 0)
     pre["div_yield"] = (dps / close * 100.0).where(close > 0)
@@ -247,7 +303,7 @@ def main() -> int:
         print(show.to_string(index=False))
 
     meta = {
-        "asof": asof, "board": a.board,
+        "asof": asof, "board": a.board, "source": source,
         "cmd": "python main_jp.py " + " ".join(sys.argv[1:]),
         "generated_at": datetime.now().strftime("%Y-%m-%d %H:%M"),
         "jpy_per_usd": round(1.0 / jpy_usd, 2),

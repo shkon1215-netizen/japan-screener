@@ -72,8 +72,22 @@ FX_URL = "https://api.frankfurter.app/latest?from=USD&to=JPY"
 # ---------------------------------------------------------------------------
 # Cache
 # ---------------------------------------------------------------------------
+# Bump a namespace's version whenever the SHAPE of what it stores changes -
+# a new field, a renamed one, a value that used to be a list and is now a
+# string. Without this the old shape outlives the fix by a full TTL, and the
+# symptom is a column that is quietly empty rather than an error. It happened
+# twice during this build: fin_years stayed a Python list repr, and dividends
+# came back all-NaN because the cached .info records predated the field.
+CACHE_SCHEMA = {
+    "kb": 2,     # kabutan: fin_years became a comma-joined string
+    "yf": 2,     # yfinance .info: gained dividend_rate
+    "yfs": 2,    # yfinance statements: split-adjustment flags corrected
+}
+
+
 class Cache:
-    """Disk cache keyed by (namespace, key).
+    """Disk cache keyed by (namespace, key), with the namespace's shape version
+    stored alongside the value.
 
     Exists for the reason the UK build discovered: when a per-ticker source
     throttles, successive runs should FILL GAPS rather than start over. A run
@@ -96,14 +110,20 @@ class Cache:
             if datetime.now() - datetime.fromtimestamp(os.path.getmtime(p)) > self.ttl:
                 return None
             with open(p, encoding="utf-8") as fh:
-                return json.load(fh)
+                blob = json.load(fh)
         except (OSError, ValueError):
             return None
+        if not isinstance(blob, dict) or "_v" not in blob:
+            return None                      # pre-versioning entry: refetch
+        if blob.get("_v") != CACHE_SCHEMA.get(ns, 1):
+            return None                      # shape changed under it
+        return blob.get("d")
 
     def put(self, ns: str, key: str, value) -> None:
         try:
             with open(self._path(ns, key), "w", encoding="utf-8") as fh:
-                json.dump(value, fh, ensure_ascii=False)
+                json.dump({"_v": CACHE_SCHEMA.get(ns, 1), "d": value},
+                          fh, ensure_ascii=False)
         except (OSError, TypeError):
             pass
 
@@ -684,6 +704,12 @@ def _parse_kabutan(tables) -> dict:
     # strike it against that year's closing price.
     rec["eps_periods"], rec["eps_vals"] = per, [_j(v) for v in eps]
     rec["bps_periods"], rec["bps_vals"] = bps_per, [_j(v) for v in bps]
+    # kabutan labels its earnings column 修正1株益 - restated onto today's
+    # share count - while the balance-sheet column is plain 1株純資産, as
+    # filed. The two are on different bases and only the second needs
+    # un-splitting; build_valuation_history reads these flags rather than
+    # assuming, because the yfinance source has neither restated.
+    rec["eps_adjusted"], rec["bps_adjusted"] = True, False
     # Comma-joined, not a list: this column survives a CSV round trip and the
     # dashboard splits it on "," for the growth tooltip. A Python list would
     # arrive there as "['2024.03', '2025.03']" and label the bars with brackets.
@@ -706,6 +732,159 @@ def _parse_kabutan(tables) -> dict:
 def _j(v):
     """JSON-safe: the cache round-trips through json, which has no NaN."""
     return None if v is None or not np.isfinite(v) else float(v)
+
+
+# ---------------------------------------------------------------------------
+# 3a. yfinance filed statements - the fallback, and the only one CI can use
+# ---------------------------------------------------------------------------
+# kabutan answers HTTP 405 to a GitHub runner - every request, with an English
+# WAF page. minkabu answers 403 and irbank's HTML site 403; only its CSV host
+# stays open. That is a deliberate block on datacenter traffic rather than a
+# rate limit, so it is routed around rather than worked around.
+#
+# yfinance's statement endpoints do answer runners, and measured at 3 workers
+# 660 names take under three minutes. What they give is in some ways BETTER
+# than kabutan: five filed columns of income statement, balance sheet and cash
+# flow from one fetch per ticker, where kabutan publishes four years of EPS and
+# only three of BPS without a subscription.
+#
+# What is lost is specific and worth stating: kabutan carries the company's own
+# 会社予想 - formal guidance, the basis of every PER quoted in Japan. yfinance
+# has `forwardEps`, which is ANALYST CONSENSUS and a different thing entirely.
+# Presenting one as the other would be exactly the error invariant 12 exists to
+# prevent, so under this source the forecast columns are simply empty.
+_YF_ROWS = {
+    "rev": ("Total Revenue", "Operating Revenue"),
+    "op": ("Operating Income", "Total Operating Income As Reported"),
+    "np": ("Net Income Common Stockholders", "Net Income",
+           "Net Income Including Noncontrolling Interests"),
+    "equity": ("Stockholders Equity", "Total Equity Gross Minority Interest"),
+    "shares": ("Ordinary Shares Number", "Share Issued"),
+    "ocf": ("Operating Cash Flow",),
+    "cash": ("Cash And Cash Equivalents",
+             "Cash Cash Equivalents And Short Term Investments"),
+}
+
+
+def _yf_row(df, names):
+    if df is None or getattr(df, "empty", True):
+        return None
+    for n in names:
+        if n in df.index:
+            return df.loc[n]
+    return None
+
+
+def fetch_fundamentals_yf(codes, cache: Cache, delay: float = 0.0,
+                          workers: int = 3) -> pd.DataFrame:
+    """Same schema as fetch_fundamentals, from yfinance's filed statements.
+
+    Per-share figures are derived rather than taken: EPS is net income over
+    that year's share count and BPS is shareholders' equity over the same,
+    which keeps both on ONE definition across every year and every company.
+    Using the filed share count (not today's) means these are as-reported and
+    therefore NOT restated for splits - see `bps_adjusted` / `eps_adjusted`,
+    which is what tells build_valuation_history how to line them up with a
+    split-adjusted price series.
+
+    Shares come from Ordinary Shares Number, which nets off treasury stock.
+    That matters in Japan: Toyota holds about 11% of itself, and a PBR struck
+    on issued shares reads 1.11 where the market quotes 0.96.
+    """
+    import yfinance as yf
+    rows = []
+    codes = list(codes)
+
+    def one(code):
+        hit = cache.get("yfs", code)
+        if hit is None:
+            try:
+                t = yf.Ticker(code + ".T")
+                inc, bs, cf = t.income_stmt, t.balance_sheet, t.cashflow
+            except Exception:                                  # noqa: BLE001
+                return None
+            if inc is None or inc.empty:
+                return None
+            got = {k: _yf_row(inc if k in ("rev", "op", "np") else
+                              bs if k in ("equity", "shares", "cash") else cf,
+                              names)
+                   for k, names in _YF_ROWS.items()}
+            # Oldest first, to match every other series in this file.
+            periods = ["%04d.%02d" % (c.year, c.month) for c in inc.columns][::-1]
+            hit = {"periods": periods}
+            for k, ser in got.items():
+                if ser is None:
+                    hit[k] = [None] * len(periods)
+                    continue
+                vals = [_num(v) for v in list(ser)][::-1]
+                vals = (vals + [np.nan] * len(periods))[:len(periods)]
+                hit[k] = [_j(v) for v in vals]
+            cache.put("yfs", code, hit)
+            if delay:
+                time.sleep(delay)
+        if not hit or not hit.get("periods"):
+            return None
+
+        per = hit["periods"]
+        eq, sh = hit.get("equity") or [], hit.get("shares") or []
+        npr = hit.get("np") or []
+
+        def per_share(nums):
+            out = []
+            for i in range(len(per)):
+                v = nums[i] if i < len(nums) else None
+                s = sh[i] if i < len(sh) else None
+                out.append(v / s if (v is not None and s and s > 0) else None)
+            return out
+
+        eps_vals = per_share(npr)
+        bps_vals = per_share(eq)
+        rec = {
+            "ticker": code,
+            "eps_periods": per, "eps_vals": eps_vals,
+            "bps_periods": per, "bps_vals": bps_vals,
+            # BOTH restated, unlike kabutan where only EPS is. Verified rather
+            # than assumed, because assuming it cost a wrong answer: yfinance
+            # reports 日立's 2024/03 share count as 4.633bn, which is the
+            # POST-split basis - the filed figure was about 0.93bn before the
+            # 5:1 in June 2024. Its Basic EPS is restated to match. So every
+            # per-share figure derived here is already on today's basis and
+            # must NOT be un-split, or the history inflates and every name
+            # looks cheap against itself.
+            "eps_adjusted": True, "bps_adjusted": True,
+            "trailing_eps": _last([v for v in eps_vals if v is not None]),
+            "book_value_ps": _last([v for v in bps_vals if v is not None]),
+            "equity_local": _last([v for v in eq if v is not None]),
+            "cash_local": _last([v for v in (hit.get("cash") or []) if v is not None]),
+            # Derived from the same two filed lines the multiples use, so ROE
+            # cannot disagree with the PBR it is read against.
+            "roe_reported": np.nan,
+            "dps": np.nan, "fwd_eps": np.nan, "fwd_dps": np.nan,
+            "fin_years": ",".join(p[:4] for p in per[-3:]),
+            "fin_n": int(sum(1 for v in eps_vals if v is not None)),
+        }
+        ni_l = _last([v for v in npr if v is not None])
+        eq_l = rec["equity_local"]
+        if np.isfinite(ni_l) and np.isfinite(eq_l) and eq_l > 0:
+            rec["roe_reported"] = ni_l / eq_l * 100.0
+
+        n = 3
+        for key in ("rev", "op", "ocf", "np"):
+            series = [v for v in (hit.get(key) or [])]
+            tail = series[-n:]
+            for i in range(n):
+                v = tail[i] if i < len(tail) else None
+                rec["%s_y%d" % (key, i + 1)] = (v / OKU if v is not None
+                                                else np.nan)
+            rec["%s_cagr" % key] = _cagr([v for v in series if v is not None])
+        return rec
+
+    with ThreadPoolExecutor(max_workers=workers) as ex:
+        for rec in ex.map(one, codes):
+            if rec:
+                rows.append(rec)
+    _report("fundamentals (yfinance)", rows, codes, [])
+    return pd.DataFrame(rows)
 
 
 # ---------------------------------------------------------------------------
@@ -855,16 +1034,24 @@ def build_valuation_history(df: pd.DataFrame, monthly: pd.DataFrame,
         bps_map = dict(zip(list(r.get("bps_periods") or []),
                            list(r.get("bps_vals") or [])))
         yrs, pers, pbrs = [], [], []
+        eps_adj = bool(r.get("eps_adjusted", True))
+        bps_adj = bool(r.get("bps_adjusted", False))
         for p, e in list(zip(eps_p, eps_v))[-years:]:
             px = price_at(sym, p)
             yrs.append(p[:4])
-            pers.append(round(px / e, 3) if (np.isfinite(px) and e and e > 0) else None)
+            # The price is split-adjusted, always. A per-share figure that is
+            # NOT restated has to be divided by the splits since that year
+            # before the two can be compared; one that is already restated
+            # must be left alone. Getting this backwards is silent: the
+            # multiple stays a plausible number, it is just the wrong one.
+            f = split_factor_after(sym, p)
+            e_use = e if (e is None or eps_adj) else e / f
+            pers.append(round(px / e_use, 3)
+                        if (np.isfinite(px) and e_use and e_use > 0) else None)
             b = bps_map.get(p)
-            if np.isfinite(px) and b and b > 0:
-                b_adj = b / split_factor_after(sym, p)
-                pbrs.append(round(px / b_adj, 3) if b_adj > 0 else None)
-            else:
-                pbrs.append(None)
+            b_use = b if (b is None or bps_adj) else (b / f if f else b)
+            pbrs.append(round(px / b_use, 3)
+                        if (np.isfinite(px) and b_use and b_use > 0) else None)
         hy.append(yrs)
         hper.append(pers)
         hpbr.append(pbrs)
@@ -943,6 +1130,10 @@ class JapanEnricher:
             rec["total_cash"] = _num(info.get("totalCash"))
             rec["total_debt"] = _num(info.get("totalDebt"))
             rec["yf_sector"] = str(info.get("sector") or "")
+            # Trailing cash actually paid per share. Only used when the
+            # fundamentals source could not supply a filed DPS, which is the
+            # case under --source yfinance.
+            rec["dividend_rate"] = _num(info.get("dividendRate"))
             self.cache.put("yf", code, rec)
             time.sleep(self.cfg.request_delay)
             return rec
