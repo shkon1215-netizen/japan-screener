@@ -250,6 +250,26 @@ def main() -> int:
         if not ok:
             failures.append("cagr_%s" % label.replace(" ", "_"))
 
+    # Yahoo Japan's 取引値 carries a DATE after the session and a TIME on the
+    # session's own day. Strings below are real cells (2026-10-05, 22:19 JST).
+    # Reading the time as digits made every same-day price ~100x too large.
+    print("\n=== 取引値 stamps ===")
+    for label, cell, implied, want in (
+            ("date stamp", "3,02509/18", np.nan, 3025.0),
+            ("time stamp", "3,61515:30", np.nan, 3615.0),
+            ("time, decimal", "2,893.515:30", np.nan, 2893.5),
+            ("time, cross-checked", "3,61515:30", 3615.2, 3615.0),
+            # Unpadded time: the 2-digit strip would eat a price digit (361);
+            # the market-cap cross-check must pick 3,615 instead.
+            ("unpadded time", "3,6159:05", 3614.8, 3615.0),
+            # A stamp nothing reconciles with cap / shares: missing, not a guess.
+            ("unexplained", "3,61515:30", 9000.0, np.nan)):
+        v = P._price(cell, implied)
+        ok = (np.isnan(v) and np.isnan(want)) or (np.isfinite(v) and abs(v - want) < 1e-6)
+        print("  %s %-20s %-14r -> %s" % ("OK  " if ok else "FAIL", label, cell, v))
+        if not ok:
+            failures.append("price_%s" % label.replace(" ", "_").replace(",", ""))
+
     print("\n=== passing ===")
     hits = res[res["passes_any"]][["name", "board", "industry", "trailing_pe",
                                    "price_to_book", "roe_pct", "div_yield",

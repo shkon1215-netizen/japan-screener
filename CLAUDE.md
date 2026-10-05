@@ -258,9 +258,24 @@ locally and blank on Pages is the same cause, not a bug.
 - **JPX moved the roster from `.xls` to `.xlsx`.** `_roster_url()` reads the
   index page rather than hardcoding the path, and falls back to the known URL.
 
-- **Yahoo Japan's 取引値 column is the price with the session date glued on** —
-  `"3,02509/18"` is 3,025 on 09/18, not 302,509. `_price()` strips the date
-  first. If market caps ever come back ~100x too large, look here.
+- **Yahoo Japan's 取引値 column is the price with a stamp glued on, and the
+  stamp changes with the clock.** After the session it is the DATE —
+  `"3,02509/18"` is 3,025 on 09/18. On the session's own day it is the
+  last-trade TIME — `"3,61515:30"` is 3,615 at 15:30. The parser originally
+  knew only the date form, so every run on a trading day read prices ~100x too
+  large; P/Es went past the 200 bound and became missing, and **every CI run
+  from 2026-09-24 to 10-05 screened on ~20% of the universe** (passes fell
+  from 139 to 13–28; yield ≥ 2% from ~367 to 71–108). It was invisible at
+  first because the build was verified on a Saturday and its first scheduled
+  runs fell on 09-21..23, TSE holidays, when cells carry dates.
+
+  `_price()` now strips either stamp and **cross-checks every reading against
+  the same row's market cap ÷ shares**, keeping the one that reconciles and
+  leaving the price missing if none does; `market_cap_snapshot` logs a warning
+  counting those. So a third stamp format becomes a loud warning, not a silent
+  100x. If prices ever look ~100x off again, look here first — and note that
+  two runs on the same trading day are not on the same close unless both ran
+  after 15:30 JST.
 
 - **pandas 3.x** — pin `pandas<3`.
 

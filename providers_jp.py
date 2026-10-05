@@ -47,7 +47,7 @@ import os
 import re
 import time
 from concurrent.futures import ThreadPoolExecutor
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import numpy as np
 import pandas as pd
@@ -151,11 +151,39 @@ def _num(v) -> float:
         return np.nan
 
 
-def _price(v) -> float:
-    """Yahoo's 取引値 column is the price with the session date glued on:
-    '3,02509/18' is 3,025 on 09/18, not 302,509. Strip the date first."""
-    s = re.sub(r"\d{2}/\d{2}$", "", str(v).strip())
-    return _num(s)
+# What Yahoo glues onto the end of a 取引値 cell: the session DATE once the day
+# is over ('3,02509/18'), but the last-trade TIME on the session's own day
+# ('3,61515:30'). Zero-padded as observed; the unpadded form is tried too, and
+# the market-cap cross-check below decides between readings.
+_PRICE_STAMPS = (re.compile(r"\d{2}/\d{2}$"), re.compile(r"\d{2}:\d{2}$"),
+                 re.compile(r"\d:\d{2}$"))
+
+
+def _price(v, implied: float = np.nan) -> float:
+    """Yahoo's 取引値 column is the price with a stamp glued on.
+
+    After the session it is the DATE: '3,02509/18' is 3,025 on 09/18, not
+    302,509. On the session's own day it is the last-trade TIME: '3,61515:30'
+    is 3,615 at 15:30. Stripping only the date read every same-day price as
+    ~100x too large (361,515), which sent most P/Es past the bound and made
+    them missing - every CI run on a trading day from 2026-09-24 to 10-05
+    screened on ~20% of the universe. The first runs were clean only because
+    09-21..23 were TSE holidays, so the cells carried dates.
+
+    `implied` is the row's market cap over its shares outstanding, from the
+    same page. When given, the reading closest to it wins, so a stamp format
+    this code has not seen yet cannot silently rescale prices again; a cell
+    no reading explains returns NaN rather than a guess.
+    """
+    s = str(v).strip()
+    reads = [_num(p.sub("", s)) for p in _PRICE_STAMPS if p.search(s)] or [_num(s)]
+    reads = [x for x in reads if np.isfinite(x) and x > 0]
+    if not reads:
+        return np.nan
+    if not (np.isfinite(implied) and implied > 0):
+        return reads[0]
+    best = min(reads, key=lambda x: abs(np.log(x / implied)))
+    return best if abs(best / implied - 1.0) < 0.05 else np.nan
 
 
 _CODE_RE = re.compile(r"([0-9A-Z]{4,5})(?=東証|札証|名証|福証)")
@@ -432,14 +460,20 @@ class YahooJPRanking:
             pcol = self._col(t, "取引値")
             scol = self._col(t, "発行済")
             if not asof:
-                m = re.search(r"(\d{2}/\d{2})$", str(t[pcol].iloc[0]).strip())
-                asof = m.group(1) if m else ""
+                first = str(t[pcol].iloc[0]).strip()
+                m = re.search(r"(\d{2}/\d{2})$", first)
+                # A TIME stamp means the session is today (JST), not a missing date.
+                asof = m.group(1) if m else (
+                    datetime.now(timezone(timedelta(hours=9))).strftime("%m/%d")
+                    if re.search(r"\d:\d{2}$", first) else "")
             last = np.nan
             for _, r in t.iterrows():
                 mcap = _num(r[mcol]) * 1e6          # the column is 百万円
+                shares = _num(r[scol]) if scol else np.nan
+                implied = mcap / shares if shares and shares > 0 else np.nan
                 rows.append({"ticker": _code_from_label(r[label]),
-                             "close_jpy": _price(r[pcol]),
-                             "shares_out": _num(r[scol]) if scol else np.nan,
+                             "close_jpy": _price(r[pcol], implied),
+                             "shares_out": shares,
                              "market_cap_local": mcap})
                 last = mcap
             if np.isfinite(last) and last < floor_jpy:
@@ -451,6 +485,12 @@ class YahooJPRanking:
         df = df[df["ticker"].ne("")].drop_duplicates("ticker")
         log.info("market cap cross-section: %d lines over %d pages, down to %.3g JPY",
                  len(df), pages, float(df["market_cap_local"].min()))
+        # Every price that no reading reconciles with cap / shares. Normally
+        # zero; a burst means Yahoo changed the stamp again - see _price.
+        bad = int(df["close_jpy"].isna().sum())
+        if bad:
+            log.warning("%d of %d prices did not match market cap / shares and were "
+                        "left missing - check the 取引値 format", bad, len(df))
         df.attrs["asof"] = asof
         return df.reset_index(drop=True)
 
