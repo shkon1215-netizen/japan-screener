@@ -457,17 +457,46 @@ class YahooJPRanking:
 def jpy_to_usd() -> float:
     """USD per JPY - the small number (~0.0063), and it is MULTIPLIED.
 
-    Deliberately a different host from every other source here: on the UK
-    build the FX call went through the same throttled host as the
-    fundamentals, so it failed at exactly the moment it was needed and fell
-    back to a constant that silently rescaled every market cap in the gate.
+    Frankfurter first, deliberately a different host from every other source
+    here: on the UK build the FX call went through the same throttled host as
+    the fundamentals, so it failed at exactly the moment it was needed and
+    fell back to a constant that silently rescaled every market cap in the
+    gate.
+
+    Yahoo's JPY=X second. A single source turned out to be its own failure
+    mode: on 2026-10-05 Frankfurter timed out once on a GitHub runner and the
+    unhandled ReadTimeout failed the whole scheduled run, an hour after the
+    same call had answered. Yahoo shares the fundamentals' throttle, which is
+    why it is not first - but as a fallback it only has to answer once.
+
+    Still no constant at the end. If both live sources fail this raises, and
+    the run fails loudly rather than gating on a stale rate.
     """
-    r = requests.get(FX_URL, headers=HEADERS, timeout=20)
-    r.raise_for_status()
-    jpy = float(r.json()["rates"]["JPY"])
-    if not 50 < jpy < 500:
-        raise ValueError("implausible USD/JPY %r" % jpy)
-    return 1.0 / jpy
+    errors = []
+    try:
+        r = requests.get(FX_URL, headers=HEADERS, timeout=20)
+        r.raise_for_status()
+        jpy = float(r.json()["rates"]["JPY"])
+        if not 50 < jpy < 500:
+            raise ValueError("implausible USD/JPY %r" % jpy)
+        return 1.0 / jpy
+    except Exception as e:                                    # noqa: BLE001
+        errors.append("Frankfurter: %s" % (str(e)[:120] or type(e).__name__))
+        log.warning("FX via Frankfurter failed (%s); trying Yahoo", errors[-1])
+
+    try:
+        import yfinance as yf
+        h = yf.Ticker("JPY=X").history(period="5d")
+        jpy = float(h["Close"].dropna().iloc[-1])
+        if not 50 < jpy < 500:
+            raise ValueError("implausible USD/JPY %r" % jpy)
+        log.info("FX from Yahoo (JPY=X)")
+        return 1.0 / jpy
+    except Exception as e:                                    # noqa: BLE001
+        errors.append("Yahoo: %s" % (str(e)[:120] or type(e).__name__))
+
+    raise RuntimeError("no live USD/JPY rate - " + "; ".join(errors)
+                       + ". Pass --fx to pin one by hand.")
 
 
 # ---------------------------------------------------------------------------

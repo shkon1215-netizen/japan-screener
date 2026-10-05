@@ -40,7 +40,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--min-metrics", type=int, default=2)
     p.add_argument("--min-peers", type=int, default=5)
     p.add_argument("--peer-keys", default="industry,board")
-    p.add_argument("--fx", type=float, help="JPY per USD (default: live ECB)")
+    p.add_argument("--fx", type=float, help="JPY per USD (default: live - ECB via Frankfurter, then Yahoo)")
     p.add_argument("--include-class-shares", action="store_true",
                    help="keep 種類株式 - see japan_filters for why this is off")
     p.add_argument("--exclude-holdcos", action="store_true")
