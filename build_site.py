@@ -27,7 +27,7 @@ PAGES = [
     ("ALL", "jp_screen_results", "index.html", "ALL"),
 ]
 
-HINT = ("Rebuilt automatically each weekday after the KRX close. "
+HINT = ("Rebuilt automatically each weekday after the TSE close. "
         "For an on-demand run against live numbers, use the local copy.")
 
 ROBOTS = "User-agent: *\nDisallow: /\n"

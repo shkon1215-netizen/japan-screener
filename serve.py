@@ -4,8 +4,9 @@
     python serve.py --port 9000
     python serve.py --min-roe 8                   # extra args go to main_jp.py
 
-Why this exists: re-running the screen means scraping KIND and Naver and doing
-the peer maths in pandas. A page opened from disk (file://) or published as an
+Why this exists: re-running the screen means reading the JPX roster, Yahoo
+Japan's market-cap ranking and kabutan (or yfinance), and doing the peer maths
+in pandas. A page opened from disk (file://) or published as an
 Artifact has no way to do that - browsers cannot start processes, and the
 Artifact sandbox blocks external hosts outright. So the button needs something
 local listening. That is all this is.
@@ -35,7 +36,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 
-# One server, one board per entry. Each keeps its own results, its own refresh
+# One server, one board per entry, each with its own results and refresh job.
 # Japan runs as one screen rather than one per board (see dashboard.py), so
 # there is a single job here. The multi-board machinery is kept because it
 # costs nothing and is what keeps this file in step with Korea's.
@@ -57,14 +58,21 @@ def board_links(active: str) -> list[dict]:
             for slug, b in BOARDS.items() if os.path.exists(paths(slug)[0])]
 
 # main_jp.py logs progress; these turn its noise into something worth showing.
+# Each pattern matches a line main_jp.py or providers_jp.py actually logs. The
+# list inherited from Korea matched Naver and KIND lines that never appear
+# here, so the Refresh button showed "Starting…" for the whole run.
 STEPS = [
-    (re.compile(r"page (\d+), (\d+) rows so far"), "Reading listings — page {0} ({1} rows)"),
-    (re.compile(r"listings over .* pages"), "Board listing complete…"),
-    (re.compile(r"KIND .*industry rows"), "Fetching 업종 classifications…"),
-    (re.compile(r"universe: .* corporate lines"), "Trimming ETFs and funds…"),
-    (re.compile(r"cleared size/liquidity"), "Applying size gate…"),
-    (re.compile(r"EV/EBITDA (\d+)/(\d+)"), "Fetching EV/EBITDA… {0}/{1}"),
-    (re.compile(r"fetching industry"), "Enriching survivors…"),
+    (re.compile(r"roster: (\d+) domestic lines"), "Read the JPX roster ({0} lines)…"),
+    (re.compile(r"監理・整理銘柄: (\d+) codes"), "Read the 監理・整理 list ({0} codes)…"),
+    (re.compile(r"market cap cross-section: (\d+) lines over (\d+) pages"),
+     "Read Yahoo Japan market caps ({0} lines)…"),
+    (re.compile(r"cleared the size gate"), "Applying size gate…"),
+    (re.compile(r"cleared the liquidity gate"), "Applying liquidity gate…"),
+    (re.compile(r"fetching filed fundamentals for (\d+) names from (\w+)"),
+     "Fetching filed fundamentals from {1} ({0} names)…"),
+    (re.compile(r"fetching EV/EBITDA for (\d+) names"), "Fetching EV/EBITDA for {0} names…"),
+    (re.compile(r"enrich: (\d+) of (\d+) priced"), "EV/EBITDA: {0} of {1} priced…"),
+    (re.compile(r"reconstructing filed valuation history"), "Rebuilding valuation history…"),
 ]
 
 JOBS = {slug: {"running": False, "step": "", "error": None, "finished_at": None}
