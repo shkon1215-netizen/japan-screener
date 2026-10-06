@@ -359,7 +359,10 @@ def apply_history_screen(df: pd.DataFrame, cfg: K.ScreenConfig) -> tuple:
 
 def japan_output_columns(cfg: K.ScreenConfig) -> list:
     cols = ["ticker", "name", "board", "industry", "industry17", "topix_scale",
-            "market_cap_usd", "adv_usd", "close_jpy"]
+            "market_cap_usd", "adv_usd", "close_jpy",
+            # Which split basis today's per-share figures were put on, and by
+            # what factor - see providers_jp.restate_recent_splits.
+            "split_restated", "split_note"]
     for m in cfg.metrics:
         cols += [m, "%s_peer_median" % m, "%s_discount" % m,
                  "%s_peer_n" % m, "%s_pct_rank" % m]

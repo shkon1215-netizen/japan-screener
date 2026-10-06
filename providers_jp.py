@@ -81,7 +81,7 @@ FX_URL = "https://api.frankfurter.app/latest?from=USD&to=JPY"
 CACHE_SCHEMA = {
     "kb": 2,     # kabutan: fin_years became a comma-joined string
     "yf": 2,     # yfinance .info: gained dividend_rate
-    "yfs": 2,    # yfinance statements: split-adjustment flags corrected
+    "yfs": 3,    # yfinance statements: gained Share Issued (split detection)
 }
 
 
@@ -829,6 +829,10 @@ _YF_ROWS = {
            "Net Income Including Noncontrolling Interests"),
     "equity": ("Stockholders Equity", "Total Equity Gross Minority Interest"),
     "shares": ("Ordinary Shares Number", "Share Issued"),
+    # Issued INCLUDING treasury - the same definition as the ranking page's
+    # 発行済み株式数, so the two can be compared to detect a split Yahoo has
+    # not restated yet. See restate_recent_splits.
+    "issued": ("Share Issued",),
     "ocf": ("Operating Cash Flow",),
     "cash": ("Cash And Cash Equivalents",
              "Cash Cash Equivalents And Short Term Investments"),
@@ -875,7 +879,7 @@ def fetch_fundamentals_yf(codes, cache: Cache, delay: float = 0.0,
             if inc is None or inc.empty:
                 return None
             got = {k: _yf_row(inc if k in ("rev", "op", "np") else
-                              bs if k in ("equity", "shares", "cash") else cf,
+                              bs if k in ("equity", "shares", "issued", "cash") else cf,
                               names)
                    for k, names in _YF_ROWS.items()}
             # Oldest first, to match every other series in this file.
@@ -925,6 +929,10 @@ def fetch_fundamentals_yf(codes, cache: Cache, delay: float = 0.0,
             "book_value_ps": _last([v for v in bps_vals if v is not None]),
             "equity_local": _last([v for v in eq if v is not None]),
             "cash_local": _last([v for v in (hit.get("cash") or []) if v is not None]),
+            # Issued shares at the latest filing - restate_recent_splits compares
+            # this with today's issued count to catch an unrestated split.
+            "shares_issued_filed": _last([v for v in (hit.get("issued") or [])
+                                          if v is not None]),
             # Derived from the same two filed lines the multiples use, so ROE
             # cannot disagree with the PBR it is read against.
             "roe_reported": np.nan,
@@ -1017,6 +1025,124 @@ def average_daily_value(panel: pd.DataFrame, codes) -> pd.DataFrame:
             continue
         rows.append({"ticker": c, "adv_local": float(v.median())})
     return pd.DataFrame(rows)
+
+
+# Today's issued shares over the filed issued count, once the splits are
+# divided out, must land here to count as explained. Below 1 is treasury stock
+# cancelled since the filing (Toyota 0.92, 伊藤園 0.73 on 2026-10-05). Above 1
+# is new shares issued since the filing - routine for the capital-raising
+# growth names: メタプラネット 1.18, GENDA 1.20, 霞ヶ関キャピタル 1.24, the
+# largest seen. A first cut at 1.15 refused eight such names as if their
+# basis were broken; dilution after a filing is the normal trailing
+# convention, not a basis problem. 1.35 sits in the gap below the smallest
+# split ratio (3:2) and still refuses ほくほくFG (9.8) and ARCHION (4.5).
+SPLIT_RESIDUAL_BAND = (0.65, 1.35)
+
+
+def _splits_after(splits, idx, sym: str, period: str) -> list:
+    """Split ratios recorded after a fiscal year end ('2026.03'), oldest first."""
+    if splits is None or not period or sym not in splits.columns:
+        return []
+    try:
+        y, m = (int(x) for x in period.split("."))
+    except ValueError:
+        return []
+    s = pd.to_numeric(splits[sym], errors="coerce").fillna(0.0)
+    after = (idx.year > y) | ((idx.year == y) & (idx.month > m))
+    return [float(v) for v in s[after].tolist() if v and v > 0]
+
+
+def restate_recent_splits(df: pd.DataFrame, monthly: pd.DataFrame) -> pd.DataFrame:
+    """Put TODAY's per-share figures on the same basis as today's price.
+
+    The price is always post-split. The latest filed EPS, BPS and dividend are
+    not always: a split after the fiscal year end leaves them on the old share
+    count until someone restates them, and today's PER and PBR then come out
+    smaller by the split ratio. On 2026-10-05, 46 of 670 survivors had split
+    since their last filing, and 22 of the 148 passes were this artefact -
+    東京海上 at PER 1.8 and PBR 0.12 after a 15-for-1.
+
+    The two sources are wrong in different ways, so they are handled apart:
+
+      kabutan    BPS is as filed by definition (`bps_adjusted` False), so
+                 today's BPS is divided by every split since the filing - the
+                 same rule build_valuation_history already applies to each
+                 past year. EPS and DPS are its restated 修正 columns.
+
+      yfinance   Yahoo restates its statements for splits, but late: in
+                 October 2026 the June splits were restated (住友商事,
+                 古河電工) and the September ones were not (山九, 豊田合成), and
+                 its .info dividendRate lags the same way. Dividing blindly
+                 would double-adjust the restated names. So the filed ISSUED
+                 share count is compared with today's issued count from the
+                 ranking page - the same definition, treasury included, which
+                 reads exactly 1.000 for unaffected names and exactly the split
+                 ratio for stale ones. Among "no split" and each suffix of the
+                 splits since the filing, the one that explains the ratio is
+                 applied to EPS, BPS, the dividend rate and the filed history
+                 (Yahoo's prices are split-adjusted, so the history must be
+                 too).
+
+    A ratio no split explains is refused, not guessed: ほくほくFG's price fell
+    from 6,750 to 868 with no split recorded by Yahoo at all, and ARCHION's
+    filed count belongs to the companies it merged from. Their EPS, BPS and
+    dividend become missing, so no multiple is struck on a basis nobody can
+    vouch for. `split_note` says which case each row fell in.
+    """
+    out = df.copy()
+    splits = None
+    idx = None
+    if monthly is not None and not monthly.empty and "Stock Splits" in monthly:
+        splits = monthly["Stock Splits"]
+        idx = pd.to_datetime(monthly.index)
+    lo, hi = SPLIT_RESIDUAL_BAND
+
+    def scaled(vals, g):
+        return [None if v is None or not np.isfinite(v) else v / g for v in (vals or [])]
+
+    factors, notes = [], []
+    for i, r in out.iterrows():
+        sym = str(r["ticker"]) + ".T"
+        periods = list(r.get("eps_periods") or [])
+        fs = _splits_after(splits, idx, sym, periods[-1] if periods else "")
+        g, note = 1.0, ""
+        if not bool(r.get("bps_adjusted", False)):
+            # kabutan: BPS as filed; the history divides each year the same way.
+            f = float(np.prod(fs)) if fs else 1.0
+            if f > 1:
+                out.at[i, "book_value_ps"] = _num(r.get("book_value_ps")) / f
+                g, note = f, "kabutan BPS restated"
+        else:
+            now = _num(r.get("shares_out"))
+            filed = _num(r.get("shares_issued_filed"))
+            if np.isfinite(now) and np.isfinite(filed) and filed > 0:
+                ratio = now / filed
+                cands = [1.0] + [float(np.prod(fs[k:])) for k in range(len(fs))]
+                best = min(cands, key=lambda c: abs(np.log(ratio / c)))
+                if lo <= ratio / best <= hi:
+                    if best > 1:
+                        g, note = best, "restated for split"
+                        for c in ("trailing_eps", "book_value_ps", "dividend_rate"):
+                            if c in out.columns:
+                                out.at[i, c] = _num(r.get(c)) / g
+                        for c in ("eps_vals", "bps_vals"):
+                            if c in out.columns:
+                                out.at[i, c] = scaled(r.get(c), g)
+                else:
+                    note = "share basis mismatch"
+                    for c in ("trailing_eps", "book_value_ps", "dividend_rate"):
+                        if c in out.columns:
+                            out.at[i, c] = np.nan
+        factors.append(g)
+        notes.append(note)
+    out["split_restated"] = factors
+    out["split_note"] = notes
+    counts = pd.Series(notes, dtype=object).value_counts().to_dict()
+    log.info("split basis: %d restated for split, %d kabutan BPS restated, "
+             "%d share basis mismatch",
+             counts.get("restated for split", 0), counts.get("kabutan BPS restated", 0),
+             counts.get("share basis mismatch", 0))
+    return out
 
 
 def build_valuation_history(df: pd.DataFrame, monthly: pd.DataFrame,

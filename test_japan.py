@@ -136,6 +136,66 @@ def check_split_adjustment(failures: list) -> None:
         failures.append("split_artefact_remains")
 
 
+def check_recent_splits(failures: list) -> None:
+    """Today's EPS/BPS/dividend on today's share basis.
+
+    Shapes taken from the 2026-10-05 run: Yahoo restated the June splits and
+    not the September ones, recorded no split at all for ほくほくFG, and the
+    issued-share ratio reads exactly 1.000 or exactly the split ratio.
+    """
+    idx = pd.to_datetime(["2026-03-01", "2026-06-01", "2026-09-01", "2026-10-01"])
+    syms = ["9065.T", "8053.T", "2593.T", "8377.T", "6501.T", "9999.T", "3498.T"]
+    sp = {s: [0.0, 0.0, 0.0, 0.0] for s in syms}
+    sp["9065.T"][2] = 5.0                       # Sept 5:1, not restated
+    sp["8053.T"][1] = 4.0                       # June 4:1, restated
+    sp["6501.T"][1], sp["6501.T"][2] = 2.0, 5.0  # June 2:1 restated, Sept 5:1 not
+    sp["9999.T"][2] = 2.0                       # kabutan source, Sept 2:1
+    splits = pd.DataFrame(sp, index=idx)
+    close = pd.DataFrame({s: [1000.0] * 4 for s in syms}, index=idx)
+    monthly = pd.concat({"Close": close, "Stock Splits": splits}, axis=1)
+
+    def row(t, now, filed, bps_adj=True):
+        return {"ticker": t, "eps_periods": ["2025.03", "2026.03"],
+                "eps_vals": [100.0, 120.0], "bps_vals": [1000.0, 1100.0],
+                "bps_periods": ["2025.03", "2026.03"],
+                "trailing_eps": 120.0, "book_value_ps": 1100.0, "dividend_rate": 50.0,
+                "eps_adjusted": True, "bps_adjusted": bps_adj,
+                "shares_out": now, "shares_issued_filed": filed}
+
+    df = pd.DataFrame([
+        row("9065", 250e6, 50e6),     # ratio 5.000 = the Sept split -> restate /5
+        row("8053", 1.0e9, 1.0e9),    # ratio 1.000, June split already in -> leave
+        row("2593", 0.725e9, 1.0e9),  # treasury cancelled, no split -> leave
+        row("8377", 991e6, 100e6),    # ratio 9.91, no split recorded -> refuse
+        row("6501", 500e6, 100e6),    # ratio 5 of a 2x5 sequence -> only the /5
+        row("9999", 1.0e9, np.nan, bps_adj=False),  # kabutan: BPS /2, EPS untouched
+        row("3498", 124e6, 100e6),    # 24% new shares issued, no split -> leave
+    ])
+    out = P.restate_recent_splits(df, monthly).set_index("ticker")
+    print("\n=== splits since the last filing ===")
+    checks = [
+        ("stale split restated", out.loc["9065", "trailing_eps"] == 24.0
+         and out.loc["9065", "book_value_ps"] == 220.0
+         and out.loc["9065", "dividend_rate"] == 10.0
+         and out.loc["9065", "eps_vals"] == [20.0, 24.0]),
+        ("restated split left alone", out.loc["8053", "trailing_eps"] == 120.0
+         and out.loc["8053", "split_note"] == ""),
+        ("treasury cancellation is not a split", out.loc["2593", "book_value_ps"] == 1100.0),
+        ("unexplained ratio refused, not guessed", np.isnan(out.loc["8377", "book_value_ps"])
+         and out.loc["8377", "split_note"] == "share basis mismatch"),
+        ("only the unrestated suffix applied", out.loc["6501", "split_restated"] == 5.0
+         and out.loc["6501", "trailing_eps"] == 24.0),
+        ("kabutan: BPS restated, EPS kept", out.loc["9999", "book_value_ps"] == 550.0
+         and out.loc["9999", "trailing_eps"] == 120.0),
+        ("share issuance is not a broken basis", out.loc["3498", "trailing_eps"] == 120.0
+         and out.loc["3498", "split_note"] == ""),
+    ]
+    for label, ok in checks:
+        print("  %s %s" % ("OK  " if ok else "FAIL", label))
+        if not ok:
+            failures.append("split_%s" % label.replace(" ", "_").replace(",", ""))
+
+
 def check_history_screen(failures: list) -> None:
     """Both metrics must clear, not one of two."""
     cfg = ScreenConfig()
@@ -235,6 +295,7 @@ def main() -> int:
         failures.append("board_cohorts_missing")
 
     check_split_adjustment(failures)
+    check_recent_splits(failures)
     check_history_screen(failures)
 
     # CAGR must refuse to invent a rate the data cannot support.

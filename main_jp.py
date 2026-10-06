@@ -236,6 +236,18 @@ def main() -> int:
         if c not in pre.columns:
             pre[c] = np.nan
 
+    # Split events arrive with the monthly panel, and today's per-share figures
+    # need them BEFORE any multiple is struck - a split since the last filing
+    # leaves EPS and BPS on the old share count. Fetched once, reused by the
+    # history below. See P.restate_recent_splits.
+    monthly = P.fetch_price_panel(pre["ticker"], "2y" if a.no_history else "8y",
+                                  "1mo", actions=True)
+    pre = P.restate_recent_splits(pre, monthly)
+    notes = pre["split_note"].value_counts().to_dict()
+    jstats["split_restated"] = int(notes.get("restated for split", 0)
+                                   + notes.get("kabutan BPS restated", 0))
+    jstats["split_basis_mismatch"] = int(notes.get("share basis mismatch", 0))
+
     # Today's multiples, struck on the SAME filed figures the history uses.
     # This is the property that makes "cheap against its own history" mean
     # anything: both ends of the comparison are built the same way.
@@ -259,7 +271,6 @@ def main() -> int:
 
     if not a.no_history:
         log.info("reconstructing filed valuation history...")
-        monthly = P.fetch_price_panel(pre["ticker"], "8y", "1mo", actions=True)
         pre = P.build_valuation_history(pre, monthly)
 
     # 5. screen

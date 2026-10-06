@@ -156,6 +156,51 @@ expensive.
     `fwd_eps`, `fwd_dps`, `forward_pe` and `div_yield_fwd` ride along for
     context. Same rule as Korea's `isConsensus: "Y"`, different justification.
 
+14. **Today's EPS, BPS and dividend are put on today's share basis before any
+    multiple is struck** (`restate_recent_splits`). Invariants 11–12 fixed the
+    *history*; today's figures had the same hole. The price is always
+    post-split, the latest filing is not, so a split after the fiscal year end
+    shrinks today's PER and PBR by the split ratio. Japanese companies split
+    constantly — 46 of 670 survivors had split since their last filing on
+    2026-10-05, and **22 of the 148 passes were this artefact** (東京海上 PER
+    1.8, PBR 0.12 after a 15-for-1). The two sources fail differently:
+
+    - **kabutan**: BPS is as filed, so today's BPS is divided by every split
+      since the filing — the rule the history already applied to past years.
+      Its 修正 EPS and DPS were checked restated even six days after a split
+      (山九: EPS 122.8 and BPS 6,048 → 1,210, matching Yahoo's own 1,220).
+    - **yfinance**: Yahoo restates its statements, but late — June 2026
+      splits were restated by October, September ones were not — and
+      `.info` `dividendRate` lags with them. Dividing blindly double-adjusts
+      the restated names. So the filed **Share Issued** count is compared with
+      the ranking page's 発行済み株式数 — the same definition, treasury
+      included. Unaffected names read exactly 1.000, stale ones exactly the
+      split ratio (5.000, 15.000), treasury cancelled since the filing a
+      little below 1 (Toyota 0.92). The split suffix that explains the ratio
+      is applied to EPS, BPS, dividend rate *and* the filed history.
+
+    **A ratio no split explains is refused, not guessed.** ほくほくFG's price
+    went from 6,750 to 868 with no split in Yahoo's data at all (ratio 9.91);
+    ARCHION's filed count belongs to its pre-merger companies (4.49). Their
+    per-share figures become missing (`split_note` = "share basis mismatch",
+    counted in the funnel as `split_basis_mismatch`). A few names lost is the
+    price of never striking a multiple on a basis nobody can vouch for.
+
+    The accepted band after dividing out the splits is 0.65–1.35
+    (`SPLIT_RESIDUAL_BAND`). The top is set by **new shares issued since the
+    filing**, not by buybacks: メタプラネット 1.18, GENDA 1.20, 霞ヶ関キャピタル
+    1.24. A first cut at 1.15 refused eight such names; dilution after a
+    filing is the ordinary trailing convention, not a broken basis. 1.35 sits
+    below the smallest split ratio (3:2).
+
+    Comparing against shares *outstanding* instead does not work: treasury
+    stock puts Canon at 1.52 and 三井松島 at 1.71 with no split at all.
+
+    Result on 2026-10-05 (yfinance source): 32 restated, 2 refused (ほくほくFG,
+    ARCHION), passes 148 → 141. 東京海上 now reads PER 27.0 / PBR 1.80,
+    山九 12.6 / 1.31; names Yahoo had already restated (住友商事, 古河電工,
+    花王) are unchanged.
+
 ## Two fundamentals sources, and why that is not a choice
 
 `--source auto` (default) probes kabutan with three tickers and falls back.
