@@ -32,6 +32,14 @@ HINT = ("Rebuilt automatically each weekday after the TSE close. "
 
 ROBOTS = "User-agent: *\nDisallow: /\n"
 
+# Pages published elsewhere that sit beside the screen in the switcher. The
+# governance report is built locally from a 2 GB EDINET database, so it lives in
+# its own repo (japan-governance) and is only linked from here.
+EXTERNAL = [
+    {"label": "Governance", "href": "https://shkon1215-netizen.github.io/japan-governance/",
+     "active": False},
+]
+
 
 def main() -> int:
     available = [(b, stem, out, label) for b, stem, out, label in PAGES
@@ -54,13 +62,13 @@ def main() -> int:
     # Only link to boards that actually built, so the switcher never dangles.
     for board, stem, out, _ in available:
         boards = [{"label": lb, "href": o, "active": o == out}
-                  for _, _, o, lb in available]
+                  for _, _, o, lb in available] + EXTERNAL
         path = build_dashboard(
             os.path.join(HERE, stem + ".csv"),
             os.path.join(HERE, stem + "_meta.json"),
             os.path.join(SITE, out),
             mode="standalone",
-            boards=boards if len(available) > 1 else [],
+            boards=boards if len(boards) > 1 else [],
             hint=HINT,
             noindex=True,
         )
